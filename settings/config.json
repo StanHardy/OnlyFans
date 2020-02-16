@@ -4,13 +4,17 @@
     "export_type": "json",
     "multithreading": true,
     "infinite_loop": true,
-    "user-agent": ""
+    "global_user-agent": ""
   },
   "supported": {
     "onlyfans": {
       "auth": {
+        "username": "",
+        "auth_id": "",
+        "auth_hash": "",
         "sess": "",
-        "app-token": "33d57ade8c02dbc5a333db99ff9ae26a"
+        "app-token": "33d57ade8c02dbc5a333db99ff9ae26a",
+        "user-agent": ""
       },
       "settings": {
         "auto_choice": "",
@@ -18,10 +22,16 @@
         "directory": "",
         "file_name_format": "{file_name}.{ext}",
         "text_length": "",
-        "overwrite_files": true,
+        "overwrite_files": false,
         "date_format": "%d-%m-%Y",
         "ignored_keywords": [],
-        "ignore_unfollowed_accounts": ""
+        "ignore_unfollowed_accounts": "",
+        "export_metadata": true
+      },
+      "extra_auth_settings": {
+        "extra_auth": false,
+        "choose_auth": false,
+        "merge_auth": false
       }
     },
     "justforfans": {

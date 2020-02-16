@@ -14,7 +14,8 @@ import math
 logger = logging.getLogger(__name__)
 
 # Open config.json and fill in OPTIONAL information
-json_config = json.load(open('config.json'))
+path = os.path.join('settings', 'config.json')
+json_config = json.load(open(path))
 json_global_settings = json_config["settings"]
 multithreading = json_global_settings["multithreading"]
 json_settings = json_config["supported"]["onlyfans"]["settings"]
@@ -25,6 +26,7 @@ overwrite_files = json_settings["overwrite_files"]
 date_format = json_settings["date_format"]
 ignored_keywords = json_settings["ignored_keywords"]
 ignore_unfollowed_accounts = json_settings["ignore_unfollowed_accounts"]
+export_metadata = json_settings["export_metadata"]
 maximum_length = 240
 text_length = int(json_settings["text_length"]
                   ) if json_settings["text_length"] else maximum_length
@@ -86,9 +88,10 @@ def link_check(session, app_token, username):
     result_date = datetime.utcnow().date()
     if "email" not in y:
         subscribedByData = y["subscribedByData"]
-        expired_at = subscribedByData["expiredAt"]
-        result_date = datetime.fromisoformat(
-            expired_at).replace(tzinfo=None).date()
+        if subscribedByData:
+            expired_at = subscribedByData["expiredAt"]
+            result_date = datetime.fromisoformat(
+                expired_at).replace(tzinfo=None).date()
     if y["subscribedBy"]:
         subbed = True
     elif y["subscribedOn"]:
@@ -205,9 +208,6 @@ def scrape_array(link, session, directory, username, api_type):
     master_date = "01-01-0001 00:00:00"
     for media_api in y:
         for media in media_api["media"]:
-            if media["type"] not in media_type:
-                x += 1
-                continue
             date = "-001-11-30T00:00:00+00:00"
             size = 0
             if "source" in media:
@@ -235,6 +235,10 @@ def scrape_array(link, session, directory, username, api_type):
                 date_string = date_object.replace(tzinfo=None).strftime(
                     "%d-%m-%Y %H:%M:%S")
                 master_date = date_string
+
+            if media["type"] not in media_type:
+                x += 1
+                continue
             if "text" not in media_api:
                 media_api["text"] = ""
             new_dict["text"] = media_api["text"] if media_api["text"] else ""
@@ -303,9 +307,10 @@ def media_scraper(session, site_name, only_links, link, locations, directory, po
         if results["valid"]:
             os.makedirs(directory, exist_ok=True)
             os.makedirs(location_directory, exist_ok=True)
-            os.makedirs(metadata_directory, exist_ok=True)
-            archive_directory = metadata_directory+location[0]
-            export_archive(results, archive_directory)
+            if export_metadata:
+                os.makedirs(metadata_directory, exist_ok=True)
+                archive_directory = metadata_directory+location[0]
+                export_archive(results, archive_directory)
         media_set.append(results)
 
     return [media_set, directory]
@@ -315,7 +320,9 @@ def download_media(media_set, session, directory, username, post_count, location
     def download(media, session, directory, username):
         while True:
             link = media["link"]
-            r = session.head(link)
+            r = json_request(session, link, "HEAD")
+            if not r:
+                break
 
             header = r.headers
             content_length = int(header["content-length"])
@@ -353,32 +360,38 @@ def download_media(media_set, session, directory, username, post_count, location
         media_set, [session], [directory], [username]))
 
 
-def create_session(user_agent, app_token, sess="None"):
+def create_session(user_agent, app_token, auth_array):
     response = []
     auth_count = 1
     auth_version = "(V1)"
     count = 1
+    auth_cookies = [
+        {'name': 'auth_id', 'value': auth_array["auth_id"]},
+        {'name': 'auth_hash', 'value': auth_array["auth_hash"]}
+    ]
     while auth_count < 3:
         if auth_count == 2:
             auth_version = "(V2)"
-            sess = "None"
+            if auth_array["sess"]:
+                del auth_cookies[2]
             count = 1
         while count < 11:
+            session = requests.Session()
             print("Auth "+auth_version+" Attempt "+str(count)+"/"+"10")
             max_threads = multiprocessing.cpu_count()
-            session = requests.Session()
             session.mount(
                 'https://', requests.adapters.HTTPAdapter(pool_connections=max_threads, pool_maxsize=max_threads))
             session.headers = {
-                'User-Agent': user_agent, 'Referer': 'https://onlyfans.com/'}
-            auth_cookies = [
-                {'name': 'sess', 'value': sess}
-            ]
+                'User-Agent': user_agent, 'Referer': 'https://onlyfans.com/', "accept": "application/json, text/plain, */*"}
+            if auth_array["sess"]:
+                auth_cookies.append(
+                    {'name': 'sess', 'value': auth_array["sess"]})
             for auth_cookie in auth_cookies:
                 session.cookies.set(**auth_cookie)
-            session.head("https://onlyfans.com")
+            session.head(
+                "https://onlyfans.com/api2/v2/users/customer?app-token="+app_token)
             r = session.get(
-                "https://onlyfans.com/api2/v2/users/me?app-token="+app_token)
+                "https://onlyfans.com/api2/v2/users/customer?app-token="+app_token)
             count += 1
             content_type = r.headers['Content-Type']
             if r.status_code != 200 or "application/json" not in content_type:
@@ -402,11 +415,10 @@ def create_session(user_agent, app_token, sess="None"):
             subscriber_count = r["subscriptions"]["all"]
             return [session, option_string, subscriber_count, response]
         auth_count += 1
-        break
     return [False, response]
 
 
-def get_subscriptions(session, app_token, subscriber_count):
+def get_subscriptions(session, app_token, subscriber_count, me_api, auth_count=0):
     link = "https://onlyfans.com/api2/v2/subscriptions/subscribes?limit=99&offset=0&app-token="+app_token
     pool = ThreadPool()
     ceil = math.ceil(subscriber_count / 99)
@@ -414,10 +426,28 @@ def get_subscriptions(session, app_token, subscriber_count):
     offset_array = []
     for b in a:
         b = b * 99
-        offset_array.append(link.replace("offset=0", "offset=" + str(b)))
+        offset_array.append(
+            [link.replace("offset=0", "offset=" + str(b)), False])
+    if me_api["isPerformer"]:
+        link = "https://onlyfans.com/api2/v2/users/" + \
+            str(me_api["id"])+"?app-token="+app_token
+        offset_array = [[link, True]] + offset_array
 
-    def multi(link, session):
-        return json.loads(session.get(link).text)
+    def multi(array, session):
+        link = array[0]
+        performer = array[1]
+        if performer:
+            session = requests.Session()
+            x = json.loads(session.get(link).text)
+            if not x["subscribedByData"]:
+                x["subscribedByData"] = dict()
+                x["subscribedByData"]["expiredAt"] = datetime.utcnow().isoformat()
+                x["subscribedByData"]["price"] = x["subscribePrice"]
+                x["subscribedByData"]["subscribePrice"] = 0
+            x = [x]
+        else:
+            x = json.loads(session.get(link).text)
+        return x
     results = pool.starmap(multi, product(
         offset_array, [session]))
     results = list(chain(*results))
@@ -428,11 +458,14 @@ def get_subscriptions(session, app_token, subscriber_count):
         results.sort(key=lambda x: x["subscribedByData"]['expiredAt'])
         results2 = []
         for result in results:
+            result["auth_count"] = auth_count
+            result["self"] = False
             username = result["username"]
             now = datetime.utcnow().date()
             subscribedBy = result["subscribedBy"]
             subscribedByData = result["subscribedByData"]
-            result_date = subscribedByData["expiredAt"]
+            result_date = subscribedByData["expiredAt"] if subscribedByData else datetime.utcnow(
+            ).isoformat()
             price = subscribedByData["price"]
             subscribePrice = subscribedByData["subscribePrice"]
             result_date = datetime.fromisoformat(
@@ -452,7 +485,7 @@ def get_subscriptions(session, app_token, subscriber_count):
 def format_options(array):
     string = ""
     names = []
-    array = [{"username": "All"}]+array
+    array = [{"auth_count": -1, "username": "All"}]+array
     name_count = len(array)
     if name_count > 1:
 
@@ -460,7 +493,7 @@ def format_options(array):
         for x in array:
             name = x["username"]
             string += str(count)+" = "+name
-            names.append(name)
+            names.append([x["auth_count"], name])
             if count+1 != name_count:
                 string += " | "
 

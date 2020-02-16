@@ -1,3 +1,4 @@
+from modules.helpers import update_config
 import modules.onlyfans as onlyfans
 import modules.justforfans as justforfans
 import modules.four_chan as four_chan
@@ -8,6 +9,7 @@ import json
 import logging
 import traceback
 import inspect
+import os
 
 # Configure logging to the console and file system at INFO level and above
 logging.basicConfig(handlers=[logging.FileHandler('application.log', 'w', 'utf-8')], level=logging.INFO,
@@ -19,12 +21,15 @@ console.setFormatter(formatter)
 logging.getLogger("").addHandler(console)
 
 # Open config.json and fill in MANDATORY information for the script to work
-json_config = json.load(open('config.json'))
+path = os.path.join('settings', 'config.json')
+json_config = json.load(open(path))
 json_sites = json_config["supported"]
 json_settings = json_config["settings"]
 infinite_loop = json_settings['infinite_loop']
-user_agent = json_settings['user-agent']
+global_user_agent = json_settings['global_user-agent']
 domain = json_settings["auto_site_choice"]
+path = os.path.join('settings', 'extra_auth.json')
+extra_auth_config = json.load(open(path))
 
 string = ""
 site_names = []
@@ -47,45 +52,76 @@ try:
             x = int(input())
             site_name = site_names[x]
         site_name_lower = site_name.lower()
-        json_auth = json_sites[site_name_lower]["auth"]
+        json_auth_array = [json_sites[site_name_lower]
+                           ["auth"]]
+
         json_site_settings = json_sites[site_name_lower]["settings"]
         auto_scrape_all = json_site_settings["auto_scrape_all"]
-        session = []
+        extra_auth_settings = json_sites[site_name_lower]["extra_auth_settings"] if "extra_auth_settings" in json_sites[site_name_lower] else {
+            "extra_auth": False}
+        extra_auth = extra_auth_settings["extra_auth"]
+        choose_auth = extra_auth_settings["choose_auth"]
+        merge_auth = extra_auth_settings["merge_auth"]
+        if extra_auth:
+            json_auth_array += extra_auth_config[site_name_lower]["extra_auth"]
+            if choose_auth:
+                json_auth_array = helpers.choose_auth(json_auth_array)
+        session_array = []
         x = onlyfans
         app_token = ""
-        array = []
+        subscription_array = []
+        legacy = True
         if site_name_lower == "onlyfans":
-            app_token = json_auth['app-token']
-            sess = json_auth['sess'] if json_auth['sess'] else "None"
-            x = onlyfans
-            session = x.create_session(
-                user_agent, app_token, sess)
-            if not session[0]:
-                continue
-            me_api = session[3]
-            array = x.get_subscriptions(session[0], app_token, session[2])
-            if me_api["isPerformer"]:
-                array = [{"username": me_api["username"]}] + array
-            array = x.format_options(array)
+            legacy = False
+            subscription_array = []
+            auth_count = -1
+            for json_auth in json_auth_array:
+                auth_count += 1
+                app_token = json_auth['app-token']
+                user_agent = global_user_agent if not json_auth['user-agent'] else json_auth['user-agent']
+
+                auth_id = json_auth['auth_id']
+                auth_hash = json_auth['auth_hash']
+                sess = json_auth['sess']
+
+                auth_array = dict()
+                auth_array["auth_id"] = auth_id
+                auth_array["auth_hash"] = auth_hash
+                auth_array["sess"] = sess
+                # update_config(json_config)
+                x = onlyfans
+                session = x.create_session(
+                    user_agent, app_token, auth_array)
+                session_array.append(session)
+                if not session[0]:
+                    continue
+                me_api = session[3]
+                array = x.get_subscriptions(
+                    session[0], app_token, session[2], me_api, auth_count)
+                subscription_array += array
+            subscription_array = x.format_options(subscription_array)
         elif site_name == "justforfans":
-            auth_id = json_auth['phpsessid']
-            auth_hash = json_auth['user_hash2']
-            x = justforfans
-            session = x.create_session(user_agent, auth_id, auth_hash)
-            array = x.get_subscriptions()
+            for json_auth in json_auth_array:
+                auth_id = json_auth['phpsessid']
+                auth_hash = json_auth['user_hash2']
+                user_agent = global_user_agent if not json_auth['user-agent'] else json_auth['user-agent']
+                x = justforfans
+                session_array = [x.create_session(
+                    user_agent, auth_id, auth_hash)]
+                array = x.get_subscriptions()
         elif site_name == "4chan":
             x = four_chan
-            session = x.create_session()
+            session_array = [x.create_session()]
             array = x.get_subscriptions()
-            array = x.format_options(array)
+            subscription_array = x.format_options(array)
         elif site_name == "bbwchan":
             x = bbwchan
-            session = x.create_session()
+            session_array = [x.create_session()]
             array = x.get_subscriptions()
-            array = x.format_options(array)
-        names = array[0]
+            subscription_array = x.format_options(array)
+        names = subscription_array[0]
         if names:
-            print("Names: "+array[1])
+            print("Names: "+subscription_array[1])
             if not auto_scrape_all:
                 value = int(input().strip())
             else:
@@ -100,9 +136,16 @@ try:
         start_time = timeit.default_timer()
         download_list = []
         for name in names:
+            if not legacy:
+                json_auth = json_auth_array[name[0]]
+                auth_count = name[0]
+                session = session_array[auth_count][0]
+                name = name[1]
+            else:
+                session = session_array[0][0]
             username = helpers.parse_links(site_name_lower, name)
             result = x.start_datascraper(
-                session[0], username, site_name, app_token)
+                session, username, site_name, app_token)
             download_list.append(result)
         for y in download_list:
             for arg in y[1]:

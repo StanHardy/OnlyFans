@@ -6,12 +6,14 @@ import json
 from PIL import Image
 import os
 from os.path import dirname as up
+import requests
 
 path = up(up(os.path.realpath(__file__)))
 os.chdir(path)
 
 # Open config.json and fill in OPTIONAL information
-json_config = json.load(open('config.json'))
+path = os.path.join('settings', 'config.json')
+json_config = json.load(open(path))
 json_global_settings = json_config["settings"]
 export_type = json_global_settings["export_type"]
 os_name = platform.system()
@@ -36,9 +38,12 @@ def parse_links(site_name, input_link):
 
 def reformat(directory, file_name, text, ext, date, username, format_path, date_format, text_length, maximum_length):
     path = format_path.replace("{username}", username)
-    text = BeautifulSoup(text, 'html.parser').get_text().replace(
+    text = BeautifulSoup(text, 'lxml').get_text().replace(
         "\n", " ").strip()
-    filtered_text = re.sub(r'[\\/*?:"<>|]', '', text)
+    SAFE_PTN = '[^0-9a-zA-Z-_.()]+'
+    # filtered_text = re.sub(r'[\\/*?:"<>|]', '', text)
+    filtered_text = re.sub(SAFE_PTN, ' ',  text.strip()
+                           ).strip().replace(' ', '_')[:text_length]
     path = path.replace("{text}", filtered_text)
     date = date.strftime(date_format)
     path = path.replace("{date}", date)
@@ -120,7 +125,7 @@ def get_directory(directory):
         os.makedirs(directory, exist_ok=True)
         return directory
     else:
-        return "/sites/"
+        return os.path.abspath("sites")
 
 
 def format_directory(j_directory, site_name, username, location, api_type):
@@ -199,5 +204,37 @@ def json_request(session, link, type="GET"):
         try:
             r = session.get(link, stream=True)
             return r
-        except ConnectionResetError:
+        except (requests.exceptions.ConnectionError, ConnectionResetError):
             count += 1
+
+
+def update_config(json_config):
+    path = os.path.join('settings', 'config.json')
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(json_config, f, ensure_ascii=False, indent=2)
+
+
+def choose_auth(array):
+    string = ""
+    names = []
+    array = [{"auth_count": -1, "username": "All"}]+array
+    name_count = len(array)
+    if name_count > 1:
+
+        count = 0
+        for x in array:
+            name = x["username"]
+            string += str(count)+" = "+name
+            names.append(x)
+            if count+1 != name_count:
+                string += " | "
+
+            count += 1
+
+    print("Auth Usernames: "+string)
+    value = int(input().strip())
+    if value:
+        names = [names[value]]
+    else:
+        names.pop(0)
+    return names
