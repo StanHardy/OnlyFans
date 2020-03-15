@@ -1,5 +1,5 @@
 import requests
-from modules.helpers import *
+from modules.helpers import get_directory, json_request, reformat, format_directory, format_media_set, export_archive, format_image
 
 import os
 import json
@@ -34,17 +34,18 @@ if text_length > maximum_length:
     text_length = maximum_length
 
 
-def start_datascraper(session, username, site_name, app_token):
+def start_datascraper(session, identifier, site_name, app_token):
     print("Scrape Processing")
-    print("Name: "+username)
-    user_id = link_check(session, app_token, username)
-    if not user_id[0]:
-        print(user_id[1])
+    info = link_check(session, app_token, identifier)
+    if not info["subbed"]:
+        print(info["user"])
         print("First time? Did you forget to edit your config.json file?")
         return [False, []]
-
-    post_counts = user_id[2]
-    user_id = user_id[1]
+    user = info["user"]
+    post_counts = info["count"]
+    user_id = str(user["id"])
+    username = user["username"]
+    print("Name: "+username)
     array = scrape_choice(user_id, app_token, post_counts)
     prep_download = []
     for item in array:
@@ -55,7 +56,7 @@ def start_datascraper(session, username, site_name, app_token):
         item[1].pop(3)
         api_type = item[2]
         results = media_scraper(
-            session, site_name, only_links, *item[1], api_type)
+            session, site_name, only_links, *item[1], api_type, app_token)
         for result in results[0]:
             if not only_links:
                 media_set = result
@@ -70,19 +71,18 @@ def start_datascraper(session, username, site_name, app_token):
     return [True, prep_download]
 
 
-def link_check(session, app_token, username):
-    link = 'https://onlyfans.com/api2/v2/users/' + username + \
+def link_check(session, app_token, identifier):
+    link = 'https://onlyfans.com/api2/v2/users/' + str(identifier) + \
            '&app-token=' + app_token
-    r = session.get(link)
-    y = json.loads(r.text)
+    y = json_request(session, link)
     temp_user_id2 = dict()
     if not y:
-        temp_user_id2[0] = False
-        temp_user_id2[1] = "No users found"
+        temp_user_id2["subbed"] = False
+        temp_user_id2["user"] = "No users found"
         return temp_user_id2
     if "error" in y:
-        temp_user_id2[0] = False
-        temp_user_id2[1] = y["error"]["message"]
+        temp_user_id2["subbed"] = False
+        temp_user_id2["user"] = y["error"]["message"]
         return temp_user_id2
     now = datetime.utcnow().date()
     result_date = datetime.utcnow().date()
@@ -92,25 +92,27 @@ def link_check(session, app_token, username):
             expired_at = subscribedByData["expiredAt"]
             result_date = datetime.fromisoformat(
                 expired_at).replace(tzinfo=None).date()
-    if y["subscribedBy"]:
-        subbed = True
-    elif y["subscribedOn"]:
-        subbed = True
-    elif y["subscribedIsExpiredNow"] == False:
-        subbed = True
-    elif result_date >= now:
-        subbed = True
+        if y["subscribedBy"]:
+            subbed = True
+        elif y["subscribedOn"]:
+            subbed = True
+        elif y["subscribedIsExpiredNow"] == False:
+            subbed = True
+        elif result_date >= now:
+            subbed = True
+        else:
+            subbed = False
     else:
-        subbed = False
+        subbed = True
     if not subbed:
-        temp_user_id2[0] = False
-        temp_user_id2[1] = "You're not subscribed to the user"
+        temp_user_id2["subbed"] = False
+        temp_user_id2["user"] = "You're not subscribed to the user"
         return temp_user_id2
     else:
-        temp_user_id2[0] = True
-        temp_user_id2[1] = str(y["id"])
-        temp_user_id2[2] = [y["postsCount"], [y["photosCount"],
-                                              y["videosCount"], y["audiosCount"]]]
+        temp_user_id2["subbed"] = True
+        temp_user_id2["user"] = y
+        temp_user_id2["count"] = [y["postsCount"], [y["photosCount"],
+                                                    y["videosCount"], y["audiosCount"]]]
         return temp_user_id2
 
 
@@ -129,6 +131,8 @@ def scrape_choice(user_id, app_token, post_counts):
         "/messages?limit=100&offset=0&order=desc&app-token="+app_token+""
     stories_api = "https://onlyfans.com/api2/v2/users/"+user_id + \
         "/stories?limit=100&offset=0&order=desc&app-token="+app_token+""
+    hightlights_api = "https://onlyfans.com/api2/v2/users/"+user_id + \
+        "/stories/highlights?limit=100&offset=0&order=desc&app-token="+app_token+""
     post_api = "https://onlyfans.com/api2/v2/users/"+user_id + \
         "/posts?limit=100&offset=0&order=publish_date_desc&app-token="+app_token+""
     # ARGUMENTS
@@ -140,11 +144,13 @@ def scrape_choice(user_id, app_token, post_counts):
     y = ["photo", "video", "stream", "gif", "audio"]
     s_array = ["You have chosen to scrape {}", [
         stories_api, x, *mandatory, post_count], "Stories"]
+    h_array = ["You have chosen to scrape {}", [
+        hightlights_api, x, *mandatory, post_count], "Highlights"]
     p_array = ["You have chosen to scrape {}", [
         post_api, x, *mandatory, post_count], "Posts"]
     m_array = ["You have chosen to scrape {}", [
         message_api, x, *mandatory, post_count], "Messages"]
-    array = [s_array, p_array, m_array]
+    array = [s_array, h_array, p_array, m_array]
     valid_input = False
     if input_choice == "a":
         valid_input = True
@@ -189,20 +195,12 @@ def scrape_array(link, session, directory, username, api_type):
     media_type = directory[1]
     count = 0
     found = False
-    y = {}
-    while count < 11:
-        r = session.get(link)
-        count += 1
-        if r.status_code != 200:
-            continue
-        y = json.loads(r.text)
-        if not y:
-            continue
-        found = True
-        break
-    if not found:
+    y = json_request(session, link)
+    if "error" in y:
         return media_set
     x = 0
+    if api_type == "Highlights":
+        y = y["stories"]
     if api_type == "Messages":
         y = y["list"]
     master_date = "01-01-0001 00:00:00"
@@ -258,10 +256,12 @@ def scrape_array(link, session, directory, username, api_type):
     return media_set
 
 
-def media_scraper(session, site_name, only_links, link, locations, directory, post_count, username, api_type):
+def media_scraper(session, site_name, only_links, link, locations, directory, post_count, username, api_type, app_token):
     seperator = " | "
     media_set = []
+    original_link = link
     for location in locations:
+        link = original_link
         print("Scraping ["+str(seperator.join(location[1])) +
               "]. Should take less than a minute.")
         array = format_directory(
@@ -283,8 +283,7 @@ def media_scraper(session, site_name, only_links, link, locations, directory, po
         if api_type == "Messages":
             offset_count = 0
             while True:
-                r = session.get(link)
-                y = json.loads(r.text)
+                y = json_request(session, link)
                 if "list" in y:
                     if y["list"]:
                         offset_array.append(link)
@@ -302,8 +301,17 @@ def media_scraper(session, site_name, only_links, link, locations, directory, po
                     break
         if api_type == "Stories":
             offset_array.append(link)
-        results = format_media_set(location[0], pool.starmap(scrape_array, product(
-            offset_array, [session], [directories], [username], [api_type])))
+        if api_type == "Highlights":
+            r = json_request(session, link)
+            if "error" in r:
+                break
+            for item in r:
+                link2 = "https://onlyfans.com/api2/v2/stories/highlights/" + \
+                    str(item["id"])+"?app-token="+app_token+""
+                offset_array.append(link2)
+        x = pool.starmap(scrape_array, product(
+            offset_array, [session], [directories], [username], [api_type]))
+        results = format_media_set(location[0], x)
         if results["valid"]:
             os.makedirs(directory, exist_ok=True)
             os.makedirs(location_directory, exist_ok=True)
@@ -318,11 +326,12 @@ def media_scraper(session, site_name, only_links, link, locations, directory, po
 
 def download_media(media_set, session, directory, username, post_count, location):
     def download(media, session, directory, username):
-        while True:
+        count = 0
+        while count < 11:
             link = media["link"]
-            r = json_request(session, link, "HEAD")
+            r = json_request(session, link, "HEAD", True, False)
             if not r:
-                break
+                return False
 
             header = r.headers
             content_length = int(header["content-length"])
@@ -338,13 +347,17 @@ def download_media(media_set, session, directory, username, post_count, location
                     local_size = os.path.getsize(download_path)
                     if local_size == content_length:
                         return
-            r = json_request(session, link)
+            r = json_request(session, link, "GET", True, False)
             if not r:
-                break
-            with open(download_path, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=1024):
-                    if chunk:  # filter out keep-alive new chunks
-                        f.write(chunk)
+                return False
+            try:
+                with open(download_path, 'wb') as f:
+                    for chunk in r.iter_content(chunk_size=1024):
+                        if chunk:  # filter out keep-alive new chunks
+                            f.write(chunk)
+            except (ConnectionResetError):
+                count += 1
+                continue
             format_image(download_path, timestamp)
             logger.info("Link: {}".format(link))
             logger.info("Path: {}".format(download_path))
@@ -361,7 +374,7 @@ def download_media(media_set, session, directory, username, post_count, location
 
 
 def create_session(user_agent, app_token, auth_array):
-    response = []
+    me_api = []
     auth_count = 1
     auth_version = "(V1)"
     count = 1
@@ -388,39 +401,36 @@ def create_session(user_agent, app_token, auth_array):
                     {'name': 'sess', 'value': auth_array["sess"]})
             for auth_cookie in auth_cookies:
                 session.cookies.set(**auth_cookie)
-            session.head(
-                "https://onlyfans.com/api2/v2/users/customer?app-token="+app_token)
-            r = session.get(
-                "https://onlyfans.com/api2/v2/users/customer?app-token="+app_token)
+
+            link = "https://onlyfans.com/api2/v2/users/customer?app-token="+app_token
+
+            # r = json_request(session, link, "HEAD", True, False)
+            r = json_request(session, link, json_format=True)
             count += 1
-            content_type = r.headers['Content-Type']
-            if r.status_code != 200 or "application/json" not in content_type:
+            if not r:
                 continue
-            response = json.loads(r.text)
-            if 'error' in response:
-                error_message = response["error"]["message"]
+            me_api = r
+            if 'error' in r:
+                error_message = r["error"]["message"]
                 print(error_message)
                 if "token" in error_message:
-                    count = 10
+                    break
                 continue
             else:
-                print("Welcome "+response["name"])
+                print("Welcome "+r["name"])
             option_string = "username or profile link"
-            r = session.get(
-                "https://onlyfans.com/api2/v2/subscriptions/count/all?app-token="+app_token)
-            r = json.loads(r.text)
-            if "subscriptions" not in r:
-                count = 10
-                continue
+            link = "https://onlyfans.com/api2/v2/subscriptions/count/all?app-token="+app_token
+            r = json_request(session, link)
+            if not r:
+                break
             subscriber_count = r["subscriptions"]["all"]
-            return [session, option_string, subscriber_count, response]
+            return [session, option_string, subscriber_count, me_api]
         auth_count += 1
-    return [False, response]
+    return [False, me_api]
 
 
 def get_subscriptions(session, app_token, subscriber_count, me_api, auth_count=0):
     link = "https://onlyfans.com/api2/v2/subscriptions/subscribes?limit=99&offset=0&app-token="+app_token
-    pool = ThreadPool()
     ceil = math.ceil(subscriber_count / 99)
     a = list(range(ceil))
     offset_array = []
@@ -438,7 +448,7 @@ def get_subscriptions(session, app_token, subscriber_count, me_api, auth_count=0
         performer = array[1]
         if performer:
             session = requests.Session()
-            x = json.loads(session.get(link).text)
+            x = json_request(session, link)
             if not x["subscribedByData"]:
                 x["subscribedByData"] = dict()
                 x["subscribedByData"]["expiredAt"] = datetime.utcnow().isoformat()
@@ -446,8 +456,10 @@ def get_subscriptions(session, app_token, subscriber_count, me_api, auth_count=0
                 x["subscribedByData"]["subscribePrice"] = 0
             x = [x]
         else:
-            x = json.loads(session.get(link).text)
+            x = json_request(session, link)
         return x
+    link_count = len(offset_array) if len(offset_array) > 0 else 1
+    pool = ThreadPool(link_count)
     results = pool.starmap(multi, product(
         offset_array, [session]))
     results = list(chain(*results))

@@ -198,13 +198,22 @@ def check_for_dupe_file(overwrite_files, media, download_path, og_filename, dire
     return [found, download_path]
 
 
-def json_request(session, link, type="GET"):
+def json_request(session, link, method="GET", stream=False, json_format=True):
     count = 0
     while count < 11:
         try:
-            r = session.get(link, stream=True)
-            return r
-        except (requests.exceptions.ConnectionError, ConnectionResetError):
+            r = session.request(method, link, stream=stream)
+            content_type = r.headers['Content-Type']
+            if json_format:
+                if "application/json;" not in content_type:
+                    count += 1
+                    continue
+                return json.loads(r.text)
+            else:
+                return r
+        except (ConnectionResetError):
+            count += 1
+        except (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError):
             count += 1
 
 
